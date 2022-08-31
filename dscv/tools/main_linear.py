@@ -8,11 +8,11 @@ import math
 import torch
 import torch.backends.cudnn as cudnn
 
-from main_ce import set_loader
-from util import AverageMeter
-from util import adjust_learning_rate, warmup_learning_rate, accuracy
-from util import set_optimizer
-from networks.resnet_big import SupConResNet, LinearClassifier
+from dscv.tools.train import set_loader
+from dscv.utils.util import AverageMeter
+from dscv.utils.util import adjust_learning_rate, warmup_learning_rate, accuracy
+from dscv.utils.util import set_optimizer
+from dscv.models.models.resnet_big import SupConResNet, LinearClassifier
 
 try:
     import apex

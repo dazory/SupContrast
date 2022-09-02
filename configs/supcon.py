@@ -19,5 +19,15 @@ lr_config = dict(
     warmup_from=0.01,
     warm_epochs=10
 )
+
 runner = dict(epochs=8)
 
+log_config = dict(
+    loggers=[
+        dict(type='wandb_logger',
+             init_kwargs=dict(project="supcontrast", entity="hong-dasol",
+                              config=dict()),
+             interval=500,
+             )
+    ]
+)

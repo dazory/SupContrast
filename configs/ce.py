@@ -7,7 +7,7 @@ _base_ = [
 
 data = dict(
     batch_size=64,
-    num_workers=16,
+    num_workers=0,
 )
 optimizer = dict(
     learning_rate=0.8,
@@ -19,3 +19,13 @@ lr_config = dict(
     warm_epochs=10
 )
 runner = dict(epochs=8)
+
+log_config = dict(
+    loggers=[
+        dict(type='wandb_logger',
+             init_kwargs=dict(project="supcontrast", entity="hong-dasol",
+                              config=dict()),
+             interval=500,
+             )
+    ]
+)

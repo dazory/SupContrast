@@ -3,13 +3,12 @@ import sys
 import argparse
 import time
 import math
+import numpy as np
 
-import tensorboard_logger as tb_logger
 import torch
 import torch.backends.cudnn as cudnn
 from torchvision import datasets
 import torch.optim as optim
-import numpy as np
 
 from dscv.utils.util import TwoCropTransform
 from dscv.utils.util import AverageMeter
@@ -18,6 +17,7 @@ from dscv.utils.util import save_model
 from dscv.models.models.resnet_big import SupCEResNet
 from dscv.models.losses.sup_con_loss import SupConLoss
 from dscv.utils.config import Config, replace_cfg_vals
+from dscv.utils.logger import Logger
 
 
 def parse_option():
@@ -29,7 +29,7 @@ def parse_option():
     return opt
 
 
-def update_model_name(cfg):
+def get_model_name(cfg):
     model_name = 'SupCE_{}_{}_lr_{}_decay_{}_bsz_{}_trial_{}'. \
         format(cfg.data.dataset,
                cfg.model.type,
@@ -42,14 +42,13 @@ def update_model_name(cfg):
             model_name = '{}_cosine'.format(model_name)
         if cfg.optimizer.lr_config.warm:
             model_name = '{}_warm'.format(model_name)
-    cfg.model_name = model_name
-    return cfg
+    return model_name
 
 
 def set_loader(cfg):
     train_transform = cfg.train.transform
     val_transform = cfg.val.transform
-    if cfg.method == 'SupCon' or 'SimCLR':
+    if (cfg.method == 'SupCon') or (cfg.method == 'SimCLR'):
         train_transform = TwoCropTransform(train_transform)
 
     # Construct data loader
@@ -99,6 +98,28 @@ class Runner():
         self._epoch = 0
         self._iter = 0
 
+    @property
+    def epoch(self):
+        return self._epoch
+
+    @epoch.setter
+    def epoch(self, value):
+        self._epoch = value
+        self.logger._epoch = value
+
+    @property
+    def iter(self):
+        return self._iter
+
+    @iter.setter
+    def iter(self, value):
+        self._iter = value
+        self.logger._iter = value
+
+    def update_epoch(self):
+        self.logger._epoch = self._epoch
+        return self._epoch
+
     def set_model(self, cfg):
         model = SupCEResNet(name=cfg.type, num_classes=self.n_cls)
         if cfg.method == 'SupCE':
@@ -126,18 +147,12 @@ class Runner():
         self.optimizer = optimizer
 
     def set_logger(self, cfg):
-        for i in range(len(cfg.loggers)):
-            if cfg.loggers[i].type == 'tb_logger':
-                logger_cfg = cfg.loggers[i]
-                logger = tb_logger.Logger(logdir=logger_cfg.tb_folder, flush_secs=2)
-                self.logger = logger
-                return
-        return TypeError(cfg)
+        self.logger = Logger(cfg)
 
     def save_file(self, filename=''):
         save_file = os.path.join(
             self.log_cfg.save_folder, filename)
-        save_model(self.model, self.optimizer, self.config_path, self._epoch, save_file)
+        save_model(self.model, self.optimizer, self.config_path, self.epoch, save_file)
 
     def update_best_acc(self, acc):
         if acc > self._best_acc:
@@ -148,9 +163,9 @@ class Runner():
         if self.optim_cfg.lr_config.cosine:
             eta_min = lr * (self.optim_cfg.lr_decay_rate ** 3)
             lr = eta_min + (lr - eta_min) * (
-                    1 + math.cos(math.pi * self._epoch / self._max_epochs)) / 2
+                    1 + math.cos(math.pi * self.epoch / self._max_epochs)) / 2
         else:
-            steps = np.sum(self._epoch > np.asarray(self.optim_cfg.lr_decay_epochs))
+            steps = np.sum(self.epoch > np.asarray(self.optim_cfg.lr_decay_epochs))
             if steps > 0:
                 lr = lr * (self.optim_cfg.lr_decay_rate ** steps)
 
@@ -159,8 +174,8 @@ class Runner():
 
     def warmup_learning_rate(self, total_batches):
         lr_config = self.optim_cfg.lr_config
-        if lr_config.warm and self._epoch <= lr_config.warm_epochs:
-            p = (self._iter + (self._epoch - 1) * total_batches) / \
+        if lr_config.warm and self.epoch <= lr_config.warm_epochs:
+            p = (self.iter + (self.epoch - 1) * total_batches) / \
                 (lr_config.warm_epochs * total_batches)
             lr = lr_config.warmup_from + p * (lr_config.warmup_to - lr_config.warmup_from)
 
@@ -168,40 +183,42 @@ class Runner():
                 param_group['lr'] = lr
 
     def train(self, train_loader, do_val=False, val_loader=None):
-        self._epoch = 1
-        while(self._epoch < self._max_epochs + 1):
+        self.logger.before_run()
+        self.epoch = 1
+
+        while(self.epoch < self._max_epochs + 1):
             self.adjust_learning_rate()
 
             # Train for one epoch
+            self.logger.before_train_epoch()
             time1 = time.time()
-            loss, train_acc = self.train_step(train_loader)
-            time2 = time.time()
-            print('epoch {}, total time {:.2f}'.format(self._epoch, time2 - time1))
 
-            # Tensorboard logger
-            if self.logger is not None:
-                self.logger.log_value('train_loss', loss, self._epoch)
-                self.logger.log_value('train_acc', train_acc, self._epoch)
-                self.logger.log_value('learning_rate', self.optimizer.param_groups[0]['lr'], self._epoch)
+            loss, train_acc = self.train_step(train_loader)
+
+            time2 = time.time()
+            print('epoch {}, total time {:.2f}'.format(self.epoch, time2 - time1))
+            self.logger.after_train_epoch()
 
             # Evaluation
             if do_val:
                 assert val_loader is not None
-                loss, val_acc = self.validate(val_loader)
-                if self.logger is not None:
-                    self.logger.log_value('val_loss', loss, self._epoch)
-                    self.logger.log_value('val_acc', val_acc, self._epoch)
+                self.logger.before_val_epoch()
 
+                loss, val_acc = self.validate(val_loader)
+
+                self.logger.update_data(dict(val_loss=loss, val_acc=val_acc))
+                self.logger.after_val_epoch()
                 self.update_best_acc(val_acc)
 
-                if self._epoch % self.log_cfg.save_freq == 0:
-                    self.save_file('ckpt_epoch_{epoch}.pth'.format(epoch=self._epoch))
+                if self.epoch % self.log_cfg.save_freq == 0:
+                    self.save_file('ckpt_epoch_{epoch}.pth'.format(epoch=self.epoch))
 
-            self._epoch += 1
+            self.epoch += 1
 
         # save the last model
         self.save_file('last.pth')
         print('best accuracy: {:.2f}'.format(self._best_acc))
+        self.logger.after_run()
 
     def train_step(self, data_loader):
         self.model.train()
@@ -213,8 +230,9 @@ class Runner():
 
         end = time.time()
         for idx, (images, labels) in enumerate(data_loader):
-            self._iter = idx
+            self.iter = idx
             data_time.update(time.time() - end)
+            self.logger.before_train_iter()
 
             if torch.is_tensor(images):
                 images = images.cuda(non_blocking=True)
@@ -234,6 +252,7 @@ class Runner():
 
             # Compute loss
             output = self.model(images)
+
             if output.shape[0] != bsz:
                 assert output.shape[0] % bsz == 0
                 num = output.shape[0] // bsz
@@ -262,15 +281,16 @@ class Runner():
             end = time.time()
 
             # Print info
-            if (self._iter + 1) % self.log_cfg.print_freq == 0:
+            if (self.iter + 1) % self.log_cfg.print_freq == 0:
                 print('Train: [{0}][{1}/{2}]\t'
                       'BT {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                       'DT {data_time.val:.3f} ({data_time.avg:.3f})\t'
                       'loss {loss.val:.3f} ({loss.avg:.3f})\t'
                       'Acc@1 {top1.val:.3f} ({top1.avg:.3f})'.format(
-                    self._epoch, self._iter + 1, len(data_loader), batch_time=batch_time,
+                    self.epoch, self.iter + 1, len(data_loader), batch_time=batch_time,
                     data_time=data_time, loss=losses, top1=top1))
                 sys.stdout.flush()
+            self.logger.after_train_iter()
 
         return losses.avg, top1.avg
 
@@ -285,6 +305,7 @@ class Runner():
         with torch.no_grad():
             end = time.time()
             for idx, (images, labels) in enumerate(data_loader):
+                self.logger.before_val_iter()
                 images = images.float().cuda()
                 labels = labels.cuda()
                 bsz = labels.shape[0]
@@ -309,9 +330,14 @@ class Runner():
                           'Acc@1 {top1.val:.3f} ({top1.avg:.3f})'.format(
                         idx, len(data_loader), batch_time=batch_time,
                         loss=losses, top1=top1))
+                self.logger.after_val_iter()
+
+        val_loss = losses.avg
+        val_acc = top1.avg
 
         print(' * Acc@1 {top1.avg:.3f}'.format(top1=top1))
-        return losses.avg, top1.avg
+
+        return val_loss, val_acc
 
 
 def main():
@@ -320,16 +346,23 @@ def main():
     cfg = Config.fromfile(opt.config)
     cfg = replace_cfg_vals(cfg)
     cfg = cfg._cfg_dict
-    cfg = update_model_name(cfg)
+    cfg.model_name = get_model_name(cfg)
 
     cfg.config_path = opt.config
     cfg.log_config['save_folder'] = os.path.join(f"{opt.work_dir}/{cfg.data.dataset}_models", cfg.model_name)
-    for i in range(len(cfg.log_config.loggers)):
-        if cfg.log_config.loggers[i]['type'] == 'tb_logger':
-            cfg.log_config.loggers[i]['tb_folder'] = os.path.join(f"{opt.work_dir}/{cfg.data.dataset}_tensorboard",
-                                                                    cfg.model_name)
-            os.makedirs(cfg.log_config.loggers[i].tb_folder, exist_ok=True)
+    for logger in cfg.log_config.loggers:
+        if logger['type'] == 'tb_logger':
+            logger['tb_folder'] = os.path.join(f"{opt.work_dir}/{cfg.data.dataset}_tensorboard",
+                                               cfg.model_name)
+            os.makedirs(logger.tb_folder, exist_ok=True)
+        elif logger['type'] == 'wandb_logger':
+            logger.init_kwargs.update(name=cfg.model_name)
+            logger.init_kwargs['config'].update(dict(dataset=cfg.data.dataset,
+                                                     model=cfg.model.type,
+                                                     method=cfg.model.method,
+                                                     epochs=cfg.runner.epochs,))
     os.makedirs(cfg.log_config.save_folder, exist_ok=True)
+
 
     # Build runner
     runner = Runner(cfg)
@@ -344,7 +377,7 @@ def main():
     # Build optimizer
     runner.set_optimizer(cfg.optimizer)
 
-    # Tensorboard
+    # Logger
     runner.set_logger(cfg.log_config)
 
     # Training routine
